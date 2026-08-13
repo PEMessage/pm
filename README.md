@@ -2,7 +2,7 @@
 
 `pm` is a wrapper for package managers. It gives you one command-line interface for all of them.
 
-- Supports [pacman][pacman], [paru][paru], [yay][yay], [apt][apt], [dnf][dnf], [zypper][zypper], [apk][apk], [brew][brew], and [scoop][scoop].
+- Supports [pacman][pacman], [paru][paru], [yay][yay], [apt][apt], [dnf][dnf], [zypper][zypper], [apk][apk], [brew][brew], [scoop][scoop], and [nix][nix].
 - Selects packages interactively with [fzf][fzf] and shows a package information preview.
 - Is a single script. Copy it to a directory in your `$PATH`.
 - Follows the POSIX standard. It runs on most systems, including [Termux][termux].
@@ -14,7 +14,7 @@
 Run `pm help` to print the usage:
 
 ```
-Package manager wrapper (supports: paru yay pacman apt dnf zypper apk brew scoop)
+Package manager wrapper (supports: paru yay pacman apt dnf zypper apk brew scoop nix)
 
 Usage: pm <command>
 
@@ -83,7 +83,7 @@ You configure `pm` with the following environment variables.
 
 Forces `pm` to use a specific package manager.
 
-Options: `paru`, `yay`, `pacman`, `apt`, `dnf`, `zypper`, `apk`, `brew`, `scoop`.
+Options: `paru`, `yay`, `pacman`, `apt`, `dnf`, `zypper`, `apk`, `brew`, `scoop`, `nix`.
 
 By default, `pm` detects the package manager automatically. It checks for the binaries in the order listed above.
 
@@ -115,6 +115,31 @@ Options: `auto`, `always`, `never`.
 
 The default value is `auto`. It outputs colors only when STDOUT is a TTY.
 
+### PM_NIX_JOBS
+
+Controls how many flake searches run in parallel when using the `nix` package manager.
+
+```shell
+PM_NIX_JOBS=2 pm install # Limit parallel nix search to 2
+```
+
+The default value is the number of registry flakes (one worker per flake; nix search mostly waits on I/O, so running all of them at once is fine).
+
+### PM_NIX_TIMEOUT
+
+Controls how long a single flake search may take when using the `nix` package manager. The first evaluation of an uncached flake can take a very long time; the timeout prevents one slow flake from keeping the search (and interactive selection) open forever.
+
+```shell
+PM_NIX_TIMEOUT=180 pm install # Give slow flakes up to 3 minutes
+PM_NIX_TIMEOUT=0 pm install   # Disable the timeout
+```
+
+The default value is `300` seconds.
+
+When using the `nix` package manager, all flakes from the registry are searched. Package names are prefixed with their flake reference (e.g. `nixpkgs#hello`) to keep them unambiguous.
+
+Since evaluating every flake is slow, the package list is re-evaluated on each run; nix's own evaluation cache (`~/.cache/nix/eval-cache-*`) makes the search reasonably fast on subsequent invocations.
+
 ## FAQ
 
 ### How to select multiple packages in interactive mode?
@@ -143,6 +168,7 @@ Create [an issue](https://github.com/jpikl/pm/issues) for the request. I will lo
 [brew]: https://brew.sh
 [dnf]: https://github.com/rpm-software-management/dnf
 [fzf]: https://github.com/junegunn/fzf
+[nix]: https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-profile
 [pacman]: https://wiki.archlinux.org/title/Pacman
 [paru]: https://github.com/Morganamilo/paru
 [scoop]: https://scoop.sh
