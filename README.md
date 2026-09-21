@@ -2,7 +2,7 @@
 
 `pm` is a wrapper for package managers. It gives you one command-line interface for all of them.
 
-- Supports [pacman][pacman], [paru][paru], [yay][yay], [apt][apt], [dnf][dnf], [zypper][zypper], [apk][apk], [brew][brew], [scoop][scoop], and [nix][nix].
+- Supports [pacman][pacman], [paru][paru], [yay][yay], [apt][apt], [dnf][dnf], [zypper][zypper], [apk][apk], [brew][brew], [scoop][scoop], and [nix][nix] (only `nix profile` and flakes, see [Nix](#nix)).
 - Selects packages interactively with [fzf][fzf] and shows a package information preview.
 - Is a single script. Copy it to a directory in your `$PATH`.
 - Follows the POSIX standard. It runs on most systems, including [Termux][termux].
@@ -75,6 +75,19 @@ Run `pm install <helper>`. `<helper>` is `paru`, `yay`, or their binary variant 
 
 `pm` then uses this AUR helper instead of `pacman`.
 
+### Nix
+
+Support for the `nix` package manager is limited on purpose: `pm` uses only the experimental `nix profile` interface and only works with flakes.
+
+- Only `nix profile` is used. The legacy `nix-env` interface and the traditional (channel-based) Nix workflow are not supported.
+- Only flakes are supported. Packages are referenced with their flake reference (e.g. `nixpkgs#hello`); plain channels and non-flake installs are not supported.
+- The `nix-command` and `flakes` experimental features are required. `pm` enables them automatically, so you do not have to configure them yourself.
+- The first run is slow, because nix has to evaluate every flake and build its evaluation cache. Later runs are much faster thanks to `~/.cache/nix/eval-cache-*`. While this happens, `pm` prints `Fetching packages...` to standard error so you know it is working.
+
+```shell
+PM=nix pm install nixpkgs#hello
+```
+
 ## Configuration
 
 You configure `pm` with the following environment variables.
@@ -136,10 +149,6 @@ PM_NIX_TIMEOUT=0 pm install   # Disable the timeout
 
 The default value is `300` seconds.
 
-When using the `nix` package manager, all flakes from the registry are searched. Package names are prefixed with their flake reference (e.g. `nixpkgs#hello`) to keep them unambiguous.
-
-Since evaluating every flake is slow, the package list is re-evaluated on each run; nix's own evaluation cache (`~/.cache/nix/eval-cache-*`) makes the search reasonably fast on subsequent invocations.
-
 ## FAQ
 
 ### How to select multiple packages in interactive mode?
@@ -160,8 +169,6 @@ Probably not. It can be more convenient in some cases:
 Create [an issue](https://github.com/jpikl/pm/issues) for the request. I will look into it.
 
 ## License
-
-`pm` is licensed under the [MIT license](LICENSE).
 
 [apt]: https://salsa.debian.org/apt-team/apt
 [apk]: https://wiki.alpinelinux.org/wiki/Alpine_Package_Keeper
