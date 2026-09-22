@@ -726,6 +726,12 @@ scoop_format_installed() {
 # Nix
 # =============================================================================
 
+# The new `nix` CLI commands (`nix profile`, `nix search`, ...) are experimental
+# and only usable when the `nix-command` and `flakes` features are enabled. We
+# request them explicitly so `pm` also works when the user has not enabled them
+# in their nix configuration.
+NIX_COMMAND="nix --extra-experimental-features nix-command --extra-experimental-features flakes"
+
 # All flakes from the registry are searched for packages. `nixpkgs` is always
 # searched first and plain package names are assumed to come from it. Channel
 # variants of `nixpkgs` (`nixpkgs/...`) are skipped to avoid listing the same
@@ -733,7 +739,8 @@ scoop_format_installed() {
 nix_flakes() {
     {
         echo nixpkgs
-        nix registry list 2>/dev/null | awk '
+        # shellcheck disable=SC2086
+        $NIX_COMMAND registry list 2>/dev/null | awk '
             /flake:/ {
                 name = $2
                 sub(/^flake:/, "", name)
@@ -744,23 +751,26 @@ nix_flakes() {
 }
 
 nix_install() {
+    # shellcheck disable=SC2086
     for PKG in "$@"; do
         case "$PKG" in
         *#* | *:* | */*) printf '%s\n' "$PKG" ;;
         *) printf 'nixpkgs#%s\n' "$PKG" ;;
         esac
-    done | xargs -r nix profile install
+    done | xargs -r $NIX_COMMAND profile install
 }
 
 nix_remove() {
     # Strip a possible `flake#` prefix, `nix profile remove` expects plain names.
+    # shellcheck disable=SC2086
     for PKG in "$@"; do
         printf '%s\n' "${PKG##*#}"
-    done | xargs -r nix profile remove
+    done | xargs -r $NIX_COMMAND profile remove
 }
 
 nix_upgrade() {
-    nix profile upgrade --all
+    # shellcheck disable=SC2086
+    $NIX_COMMAND profile upgrade --all
 }
 
 nix_fetch() {
@@ -775,8 +785,14 @@ nix_info() {
     # attribute component, which fails for nested attributes). `--quiet`
     # suppresses the "evaluating ..." progress messages.
     case "$1" in
-    *#*) nix search --quiet "${1%%#*}" "${1##*#}" ;;
-    *) nix search --quiet nixpkgs "$1" ;;
+    *#*)
+        # shellcheck disable=SC2086
+        $NIX_COMMAND search --quiet "${1%%#*}" "${1##*#}"
+        ;;
+    *)
+        # shellcheck disable=SC2086
+        $NIX_COMMAND search --quiet nixpkgs "$1"
+        ;;
     esac
 }
 
@@ -789,16 +805,22 @@ nix_list_all() {
     # they mostly wait on I/O), each capped by `timeout` so a slow flake (e.g.
     # an uncached first evaluation) can never keep the output stream open
     # indefinitely. Set `PM_NIX_TIMEOUT=0` to disable the cap.
+    #
+    # The first evaluation can take a long time, so we tell the user that `pm`
+    # is working before we block on it.
+    echo >&2 "Fetching packages..."
     FLAKES=$(nix_flakes)
     JOBS=${PM_NIX_JOBS:-$(printf '%s\n' "$FLAKES" | wc -l)}
-    printf '%s\n' "$FLAKES" | xargs -r -n 1 -P "$JOBS" sh -c '
+    printf '%s\n' "$FLAKES" | NIX_COMMAND="$NIX_COMMAND" xargs -r -n 1 -P "$JOBS" sh -c '
         flake=$1
         search_flake() {
             if command -v timeout >/dev/null 2>&1 && [ "${PM_NIX_TIMEOUT:-300}" -gt 0 ] 2>/dev/null; then
                 # `nix search <flake> ^` lists every package in the given flake.
-                timeout -- "${PM_NIX_TIMEOUT:-300}" nix search --quiet "$flake" ^ --json 2>/dev/null
+                # shellcheck disable=SC2086
+                timeout -- "${PM_NIX_TIMEOUT:-300}" $NIX_COMMAND search --quiet "$flake" ^ --json 2>/dev/null
             else
-                nix search --quiet "$flake" ^ --json 2>/dev/null
+                # shellcheck disable=SC2086
+                $NIX_COMMAND search --quiet "$flake" ^ --json 2>/dev/null
             fi
         }
         search_flake |
@@ -821,7 +843,8 @@ nix_list_all() {
 }
 
 nix_list_installed() {
-    nix profile list --json 2>/dev/null | awk '
+    # shellcheck disable=SC2086
+    $NIX_COMMAND profile list --json 2>/dev/null | awk '
         {
             sub(/^\{"elements":\{/, "", $0)
             sub(/\},"version":[0-9]+\}$/, "", $0)
