@@ -734,8 +734,9 @@ NIX_COMMAND="nix --extra-experimental-features nix-command --extra-experimental-
 
 # All flakes from the registry are searched for packages. `nixpkgs` is always
 # searched first and plain package names are assumed to come from it. Channel
-# variants of `nixpkgs` (`nixpkgs/...`) are skipped to avoid listing the same
-# packages repeatedly.
+# variants of `nixpkgs` (`nixpkgs/...`, e.g. release branches) are skipped to
+# avoid listing the same packages repeatedly. Only `nixpkgs` and its default
+# `nixpkgs/nixpkgs-unstable` alias are kept.
 nix_flakes() {
     {
         echo nixpkgs
@@ -744,7 +745,8 @@ nix_flakes() {
             /flake:/ {
                 name = $2
                 sub(/^flake:/, "", name)
-                if (name !~ /^nixpkgs\//) print name
+                if (name ~ /^nixpkgs\// && name != "nixpkgs/nixpkgs-unstable") next
+                print name
             }
         '
     } | awk '!seen[$0]++'
@@ -796,6 +798,46 @@ nix_info() {
     esac
 }
 
+# Index of the packages in the active profile, used to mark installed packages
+# in `nix_list_all` the same way apt uses dpkg. For installs that came from a
+# flake we emit `A<TAB>attrPath<TAB>source` (source is the flake alias, e.g.
+# `nixpkgs`), which lets `nix_list_all` tell the exact source apart from other
+# flakes that provide the same attribute. Matching on the full attribute path
+# avoids false positives from nested attributes that share a leaf name (e.g.
+# `llvmPackages.lldb` vs `lldb`). A few installs (e.g. a store path installed
+# directly) have no attribute path; for those we emit `N<TAB>name` and fall
+# back to matching the plain name.
+nix_installed_index() {
+    # shellcheck disable=SC2086
+    $NIX_COMMAND profile list --json 2>/dev/null | awk '
+        {
+            sub(/^\{"elements":\{/, "", $0)
+            sub(/\},"version":[0-9]+\}$/, "", $0)
+            gsub(/\},"/, "}\n\"")
+            n = split($0, lines, "\n")
+            for (i = 1; i <= n; i++) {
+                e = lines[i]
+                name = e
+                sub(/^"?/, "", name)
+                sub(/":\{.*/, "", name)
+                if (name == "") continue
+                if (match(e, /"attrPath":"[^"]*"/)) {
+                    attr = substr(e, RSTART + 12, RLENGTH - 13)
+                    if (attr == "") continue
+                    source = ""
+                    if (match(e, /"originalUrl":"[^"]*"/)) {
+                        source = substr(e, RSTART + 15, RLENGTH - 16)
+                        sub(/^flake:/, "", source)
+                    }
+                    printf "A\t%s\t%s\n", attr, source
+                } else {
+                    printf "N\t%s\n", name
+                }
+            }
+        }
+    '
+}
+
 nix_list_all() {
     # Nix has no package database; packages are evaluated on demand by
     # `nix search`. We do not maintain our own copy of the results but rely on
@@ -806,12 +848,24 @@ nix_list_all() {
     # an uncached first evaluation) can never keep the output stream open
     # indefinitely. Set `PM_NIX_TIMEOUT=0` to disable the cap.
     #
+    # Installed packages are marked like apt does. The profile stores the full
+    # attribute path (`legacyPackages.x86_64-linux.hello`), which is exactly
+    # what `nix search` returns as its keys, so we can match it directly. When
+    # the installed package also records the flake it came from, entries from
+    # that same flake are marked `[exact-installed]`; matches from other flakes
+    # (or installs without a flake source) are marked `[installed]`.
+    #
     # The first evaluation can take a long time, so we tell the user that `pm`
     # is working before we block on it.
     echo >&2 "Fetching packages..."
     FLAKES=$(nix_flakes)
+
+    INSTALLED_INDEX_FILE=$(mktemp)
+    trap "rm -f -- '$INSTALLED_INDEX_FILE'" EXIT
+    nix_installed_index >"$INSTALLED_INDEX_FILE"
+
     JOBS=${PM_NIX_JOBS:-$(printf '%s\n' "$FLAKES" | wc -l)}
-    printf '%s\n' "$FLAKES" | NIX_COMMAND="$NIX_COMMAND" xargs -r -n 1 -P "$JOBS" sh -c '
+    printf '%s\n' "$FLAKES" | NIX_COMMAND="$NIX_COMMAND" INSTALLED_INDEX_FILE="$INSTALLED_INDEX_FILE" xargs -r -n 1 -P "$JOBS" sh -c '
         flake=$1
         search_flake() {
             if command -v timeout >/dev/null 2>&1 && [ "${PM_NIX_TIMEOUT:-300}" -gt 0 ] 2>/dev/null; then
@@ -824,19 +878,50 @@ nix_list_all() {
             fi
         }
         search_flake |
-        awk -v flake="$flake" '\''{
+        awk -v flake="$flake" -v index_file="$INSTALLED_INDEX_FILE" '\''BEGIN {
+            while ((getline line < index_file) > 0) {
+                if (line == "") continue
+                nf = split(line, f, "\t")
+                if (f[1] == "A") {
+                    installed_attrs[f[2]] = 1
+                    if (nf >= 3 && f[3] != "") {
+                        installed_sources[f[2]] = installed_sources[f[2]] "|" f[3] "|"
+                    }
+                } else if (f[1] == "N") {
+                    installed_names[f[2]] = 1
+                }
+            }
+            close(index_file)
+        }
+        {
             gsub(/\},"/, "}\n\"")
             n = split($0, lines, "\n")
             for (i = 1; i <= n; i++) {
                 e = lines[i]
-                name = e
-                sub(/^\{?"/, "", name)
-                sub(/":\{.*/, "", name)
+                attr = e
+                sub(/^\{?"/, "", attr)
+                sub(/":\{.*/, "", attr)
+                if (attr == "") continue
+                name = attr
                 sub(/^legacyPackages\.[^.]*\./, "", name)
                 sub(/^packages\.[^.]*\./, "", name)
                 version = e
                 if (sub(/.*"version":"/, "", version)) sub(/".*/, "", version); else version = ""
-                if (name != "") print flake "#" name " " version
+                status = ""
+                if (attr in installed_attrs) {
+                    if (index(installed_sources[attr], "|" flake "|") > 0) {
+                        status = "[exact-installed]"
+                    } else {
+                        status = "[installed]"
+                    }
+                } else {
+                    # Fallback for installs without an attribute path: match on
+                    # the leaf name of the searched attribute.
+                    short = name
+                    sub(/^.*\./, "", short)
+                    if (short in installed_names) status = "[installed]"
+                }
+                print flake "#" name " " version " " status
             }
         }'\''
     ' _
@@ -871,7 +956,8 @@ nix_list_installed() {
 }
 
 nix_format_all() {
-    awk "{ print $FMT_NAME \$1 $FMT_GROUP \$2 $FMT_VERSION \$3 $FMT_RESET }"
+    # Fields: flake#name, version, status ([exact-installed], [installed] or empty)
+    awk "{ print $FMT_NAME \$1 $FMT_VERSION \$2 $FMT_STATUS \$3 $FMT_RESET }"
 }
 
 nix_format_installed() {

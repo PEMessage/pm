@@ -81,6 +81,8 @@ Support for the `nix` package manager is limited on purpose: `pm` uses only the 
 
 - Only `nix profile` is used. The legacy `nix-env` interface and the traditional (channel-based) Nix workflow are not supported.
 - Only flakes are supported. Packages are referenced with their flake reference (e.g. `nixpkgs#hello`); plain channels and non-flake installs are not supported.
+- Of the registry's `nixpkgs` aliases, only `nixpkgs` and `nixpkgs/nixpkgs-unstable` are searched. Other channel variants (`nixpkgs/nixos-26.05`, ...) are skipped to avoid listing the same packages repeatedly.
+- `pm list all` marks packages that are already in the profile. Entries from the same flake they were installed from are marked `[exact-installed]`; matching attribute paths from other flakes (or installs without a flake source) are marked `[installed]`.
 - The `nix-command` and `flakes` experimental features are required. `pm` enables them automatically, so you do not have to configure them yourself.
 - The first run is slow, because nix has to evaluate every flake and build its evaluation cache. Later runs are much faster thanks to `~/.cache/nix/eval-cache-*`. While this happens, `pm` prints `Fetching packages...` to standard error so you know it is working.
 
