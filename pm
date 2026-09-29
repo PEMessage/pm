@@ -219,7 +219,23 @@ xargs_self() {
 	# Some older xargs implementations (busybox < 1.36) do not support `-o` option to reopen /dev/tty as stdin.
 	# This is a workaround suggested by `man xargs`.
 	# shellcheck disable=SC2016
-	xargs -r sh -c '"$0" "$@" </dev/tty' "$0" "$@"
+	#
+	# Plain xargs only runs after it reads EOF. The interactive selection is
+	# written by fzf in one burst, but the pipe stays open until the package
+	# list producer has finished (for nix that means evaluating every
+	# registered flake), so the install would be delayed until then. Read the
+	# first line, then give the rest of the burst a short grace period so a
+	# multi-selection is still passed to a single invocation.
+	if is_command timeout; then
+		IFS= read -r FIRST || return 0
+		{
+			printf '%s\n' "$FIRST"
+			timeout 0.5 cat
+		} | xargs -r sh -c '"$0" "$@" </dev/tty' "$0" "$@"
+	else
+		# No timeout available: fall back to one invocation per selected package.
+		xargs -r -n 1 sh -c '"$0" "$@" </dev/tty' "$0" "$@"
+	fi
 }
 
 with_sudo() {
@@ -922,6 +938,11 @@ nix_list_all() {
                     if (short in installed_names) status = "[installed]"
                 }
                 print flake "#" name " " version " " status
+                # Searches run in parallel and share the same stdout pipe.
+                # Flush after every line so each write() stays within PIPE_BUF
+                # and cannot be interleaved with another flake (which would
+                # corrupt lines).
+                fflush()
             }
         }'\''
     ' _
