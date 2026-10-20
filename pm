@@ -144,7 +144,7 @@ list() {
 
 search() {
 	check_source "$@"
-	pm_list "$1" | pm_format "$1" | interactive_filter
+	interactive_select "$1"
 }
 
 which() {
@@ -178,6 +178,52 @@ check_source() {
 	elif [ "$1" != installed ] && [ "$1" != all ]; then
 		die_wrong_usage "invalid <source> argument '$1'"
 	fi
+}
+
+# List packages, let the user select some, and print the selection. The list
+# producer (which can be very slow, e.g. nix evaluating every registered flake)
+# runs in the background and in its own process group. This lets us stop it as
+# soon as fzf exits, instead of keeping the caller waiting until the producer
+# has finished. Without it, `search all | xargs ...` would delay the install by
+# the whole duration of the search (up to PM_NIX_TIMEOUT).
+interactive_select() {
+	SOURCE=$1
+	TMP_DIR=$(mktemp -d) || die "failed to create temporary directory"
+	LIST_FIFO=$TMP_DIR/packages
+	SELECTION_FILE=$TMP_DIR/selection
+	PRODUCER_PID=
+
+	cleanup_interactive_select() {
+		if [ "$PRODUCER_PID" ]; then
+			kill -TERM -- "-$PRODUCER_PID" 2>/dev/null ||
+				kill -TERM "$PRODUCER_PID" 2>/dev/null || :
+		fi
+		rm -rf -- "$TMP_DIR"
+	}
+	trap cleanup_interactive_select EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM HUP
+
+	if ! is_command mkfifo; then
+		die "mkfifo is not available"
+	fi
+	mkfifo "$LIST_FIFO" || die "failed to create FIFO '$LIST_FIFO'"
+
+	# Redirect the whole subshell (not only the last pipeline element), so the
+	# background job cannot keep the caller's stdout pipe open if it has to be
+	# left behind.
+	set -m 2>/dev/null || :
+	(pm_list "$SOURCE" | pm_format "$SOURCE") </dev/null >"$LIST_FIFO" &
+	PRODUCER_PID=$!
+	set +m 2>/dev/null || :
+
+	interactive_filter <"$LIST_FIFO" >"$SELECTION_FILE"
+
+	kill -TERM -- "-$PRODUCER_PID" 2>/dev/null ||
+		kill -TERM "$PRODUCER_PID" 2>/dev/null || :
+	PRODUCER_PID=
+
+	cat "$SELECTION_FILE"
 }
 
 interactive_filter() {
@@ -864,14 +910,25 @@ nix_list_all() {
     trap "rm -f -- '$INSTALLED_INDEX_FILE'" EXIT
     nix_installed_index >"$INSTALLED_INDEX_FILE"
 
+    # `timeout` normally runs its command in a separate process group. A
+    # running search would then escape the group that `interactive_select`
+    # kills when fzf exits, and would keep running after the install has
+    # started. `--foreground` keeps it in our process group. Older
+    # implementations (busybox) do not support the option; fall back to plain
+    # `timeout` there.
+    TIMEOUT_FOREGROUND=
+    if is_command timeout && timeout --foreground 0 true 2>/dev/null; then
+        TIMEOUT_FOREGROUND=--foreground
+    fi
+
     JOBS=${PM_NIX_JOBS:-$(printf '%s\n' "$FLAKES" | wc -l)}
-    printf '%s\n' "$FLAKES" | NIX_COMMAND="$NIX_COMMAND" INSTALLED_INDEX_FILE="$INSTALLED_INDEX_FILE" xargs -r -n 1 -P "$JOBS" sh -c '
+    printf '%s\n' "$FLAKES" | NIX_COMMAND="$NIX_COMMAND" INSTALLED_INDEX_FILE="$INSTALLED_INDEX_FILE" TIMEOUT_FOREGROUND="$TIMEOUT_FOREGROUND" xargs -r -n 1 -P "$JOBS" sh -c '
         flake=$1
         search_flake() {
             if command -v timeout >/dev/null 2>&1 && [ "${PM_NIX_TIMEOUT:-300}" -gt 0 ] 2>/dev/null; then
                 # `nix search <flake> ^` lists every package in the given flake.
                 # shellcheck disable=SC2086
-                timeout -- "${PM_NIX_TIMEOUT:-300}" $NIX_COMMAND search --quiet "$flake" ^ --json 2>/dev/null
+                timeout $TIMEOUT_FOREGROUND -- "${PM_NIX_TIMEOUT:-300}" $NIX_COMMAND search --quiet "$flake" ^ --json 2>/dev/null
             else
                 # shellcheck disable=SC2086
                 $NIX_COMMAND search --quiet "$flake" ^ --json 2>/dev/null
@@ -922,6 +979,11 @@ nix_list_all() {
                     if (short in installed_names) status = "[installed]"
                 }
                 print flake "#" name " " version " " status
+                # Searches run in parallel and share the same stdout pipe.
+                # Flush after every line so each write() stays within PIPE_BUF
+                # and cannot be interleaved with another flake (which would
+                # corrupt lines).
+                fflush()
             }
         }'\''
     ' _
